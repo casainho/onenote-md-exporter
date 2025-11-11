@@ -43,6 +43,15 @@ namespace alxnbl.OneNoteMdExporter
 
             [Option("ignore-errors", Required = false, HelpText = "Export all notebook event in case of error")]
             public bool IgnoreErrors { get; set; }
+
+            [Option("modified-since", Required = false, HelpText = "Only export pages updated on or after the provided date (e.g. 2024-05-01T10:30)")]
+            public string ModifiedSince { get; set; }
+
+            [Option("output-dir", Required = false, HelpText = "Root folder where exported notebooks will be written")]
+            public string OutputDirectory { get; set; }
+
+            [Option("preserve-output", Required = false, HelpText = "Do not wipe the output folder before exporting")]
+            public bool PreserveOutput { get; set; }
         }
 
         public static void Main(params string[] args)
@@ -128,15 +137,64 @@ namespace alxnbl.OneNoteMdExporter
             AppSettings.LoadAppSettings();
             AppSettings.Debug = opts.Debug;
 
+            DateTime? modifiedSince = null;
+            if (!string.IsNullOrWhiteSpace(opts.ModifiedSince))
+            {
+                if (!TryParseModifiedSince(opts.ModifiedSince, out var parsedModifiedSince))
+                {
+                    Log.Error($"Invalid value for --modified-since: '{opts.ModifiedSince}'. Use ISO 8601 (e.g. 2024-05-01T10:30) or a culture-specific format.");
+                    return;
+                }
+
+                modifiedSince = parsedModifiedSince;
+                Log.Information($"Only exporting pages modified since {modifiedSince.Value:yyyy-MM-dd HH:mm}");
+            }
+
+            string exportRoot = null;
+            if (!string.IsNullOrWhiteSpace(opts.OutputDirectory))
+            {
+                try
+                {
+                    exportRoot = Path.GetFullPath(Environment.ExpandEnvironmentVariables(opts.OutputDirectory));
+                    Directory.CreateDirectory(exportRoot);
+                    Log.Information($"Export root overridden to {exportRoot}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error($"Cannot use --output-dir '{opts.OutputDirectory}': {ex.Message}");
+                    return;
+                }
+            }
+
             var exportService = ExportServiceFactory.GetExportService(exportFormat);
+            var formatCode = exportService.ExportFormatCode;
+
+            var baseExportRoot = string.IsNullOrWhiteSpace(exportRoot)
+                ? Path.Combine(Localizer.GetString("ExportFolder"), formatCode)
+                : Path.Combine(exportRoot, formatCode);
+
+            var stateStore = ExportStateStore.Load(baseExportRoot);
 
             foreach (Notebook notebook in notebookToProcess)
             {
+                var notebookModifiedSince = modifiedSince;
+                if (!notebookModifiedSince.HasValue)
+                {
+                    var lastExport = stateStore.GetLastExport(notebook.OneNoteId);
+                    if (lastExport.HasValue)
+                    {
+                        notebookModifiedSince = lastExport.Value;
+                        Log.Information($"Notebook '{notebook.Title}': detected previous export at {lastExport.Value:yyyy-MM-dd HH:mm}");
+                    }
+                }
+
+                var preserveOutput = opts.PreserveOutput || notebookModifiedSince.HasValue || !string.IsNullOrWhiteSpace(exportRoot);
+
                 Log.Information("\n***************************************");
                 Log.Information(Localizer.GetString("StartExportingNotebook"), notebook.Title);
                 Log.Information("***************************************");
 
-                var result = exportService.ExportNotebook(notebook, opts.SectionName, opts.PageName);
+                var result = exportService.ExportNotebook(notebook, opts.SectionName, opts.PageName, notebookModifiedSince, exportRoot, preserveOutput);
 
                 if (!string.IsNullOrEmpty(result.NoteBookExportErrorMessage))
                 {
@@ -152,7 +210,7 @@ namespace alxnbl.OneNoteMdExporter
                 else if (result.PagesOnError > 0)
                 {
                     Log.Information("");
-                    Log.Warning(Localizer.GetString("ExportEndedWithErrors"), Path.GetFullPath(notebook.ExportFolder), result.PagesOnError, loggerFilename);
+                    Log.Warning(Localizer.GetString("ExportEndedWithErrors"), Path.GetFullPath(Path.Combine(notebook.ExportFolder, notebook.GetNotebookPath() ?? string.Empty)), result.PagesOnError, loggerFilename);
                     Log.Information("");
 
                     if (!opts.NoInput)
@@ -160,14 +218,20 @@ namespace alxnbl.OneNoteMdExporter
                         Log.Information(Localizer.GetString("PressEnter"));
                         Console.ReadLine();
                     }
+
+                    Log.Warning($"Notebook '{notebook.Title}' exported with errors. Last export timestamp remains unchanged.");
                 }
                 else
                 {
                     Log.Information("");
-                    Log.Information(Localizer.GetString("ExportSuccessful"), Path.GetFullPath(notebook.ExportFolder));
+                    Log.Information(Localizer.GetString("ExportSuccessful"), Path.GetFullPath(Path.Combine(notebook.ExportFolder, notebook.GetNotebookPath() ?? string.Empty)));
                     Log.Information("");
+
+                    stateStore.UpdateLastExport(notebook.OneNoteId, DateTime.Now);
                 }
             }
+
+            stateStore.Save();
 
             if (!AppSettings.Debug && !AppSettings.KeepOneNoteTempFiles)
             {
@@ -179,11 +243,31 @@ namespace alxnbl.OneNoteMdExporter
             if (!opts.NoInput)
             {
                 if (notebookToProcess.Count == 1)
-                    Process.Start("explorer.exe", Path.GetFullPath(notebookToProcess.First().ExportFolder) + Path.DirectorySeparatorChar);
+                    Process.Start("explorer.exe", Path.GetFullPath(Path.Combine(notebookToProcess.First().ExportFolder, notebookToProcess.First().GetNotebookPath() ?? string.Empty)) + Path.DirectorySeparatorChar);
 
                 Log.Information(Localizer.GetString("EndOfExport"));
                 Console.ReadLine();
             }
+        }
+
+        private static bool TryParseModifiedSince(string rawValue, out DateTime result)
+        {
+            foreach (var culture in new[] { CultureInfo.InvariantCulture, CultureInfo.CurrentCulture })
+            {
+                if (DateTime.TryParse(rawValue, culture, DateTimeStyles.AssumeLocal, out var parsed))
+                {
+                    if (parsed.Kind == DateTimeKind.Unspecified)
+                    {
+                        parsed = DateTime.SpecifyKind(parsed, DateTimeKind.Local);
+                    }
+
+                    result = parsed;
+                    return true;
+                }
+            }
+
+            result = default;
+            return false;
         }
 
         private static void UpdateSettingsForm()

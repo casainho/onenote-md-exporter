@@ -15,7 +15,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
     /// </summary>
     public class JoplinExportService : ExportServiceBase
     {
-        protected override string ExportFormatCode { get; } = "joplin-raw-dir";
+        protected override string ExportFormatCodeInternal { get; } = "joplin-raw-dir";
 
         private static string GetNoteBookFolderRoot(Node node)
             => Path.Combine(node.GetNotebook().ExportFolder, node.GetNotebook().GetNotebookPath());
@@ -58,7 +58,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
         /// <param name="notebook">The notebook</param>
         /// <param name="sectionNameFilter">Only export the specified section</param>
         /// <param name="pageNameFilter">Only export the specified page</param>
-        public override NotebookExportResult ExportNotebookInTargetFormat(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "")
+        public override NotebookExportResult ExportNotebookInTargetFormat(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "", DateTime? modifiedSince = null)
         {
             var result = new NotebookExportResult();
 
@@ -81,7 +81,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
                 if (!section.IsSectionGroup)
                 {
-                    var sectionResult = ExportSectionPages(section, pageNameFilter);
+                    var sectionResult = ExportSectionPages(section, pageNameFilter, modifiedSince);
                     result.PagesOnError += sectionResult.PagesOnError;
                 }
             }
@@ -107,14 +107,25 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
         /// Export a joplin md file for each page of the section and process page's attachments
         /// </summary>
         /// <param name="section"></param>
-        private SectionExportResult ExportSectionPages(Section section, string pageNameFilter = "")
+        private SectionExportResult ExportSectionPages(Section section, string pageNameFilter = "", DateTime? modifiedSince = null)
         {
             var result = new SectionExportResult();
 
-            Log.Debug($"Start exporting pages of section {section.Title}");
-
             // Get pages of the section and apply provided filter if any
             var pages = OneNoteApp.Instance.FillSectionPages(section).Where(p => string.IsNullOrEmpty(pageNameFilter) || p.Title == pageNameFilter).ToList();
+
+            if (modifiedSince.HasValue)
+            {
+                pages = pages.Where(p => IsPageRecentlyModified(p, modifiedSince.Value)).ToList();
+
+                if (pages.Count == 0)
+                {
+                    Log.Debug($"Skipping section {section.Title} because no pages were modified since {modifiedSince.Value:yyyy-MM-dd HH:mm}");
+                    return result;
+                }
+            }
+
+            Log.Debug($"Start exporting pages of section {section.Title}");
 
             int cmpt = 0;
 

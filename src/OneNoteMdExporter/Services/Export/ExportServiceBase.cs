@@ -21,7 +21,9 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
     /// </summary>
     public abstract class ExportServiceBase : IExportService
     {
-        protected abstract string ExportFormatCode { get; }
+        protected abstract string ExportFormatCodeInternal { get; }
+
+        public string ExportFormatCode => ExportFormatCodeInternal;
 
         protected static string GetNotebookFolderPath(Notebook notebook)
             => Path.Combine(notebook.ExportFolder, notebook.GetNotebookPath());
@@ -47,10 +49,22 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
         protected abstract string GetPageMdFilePath(Page page);
 
 
-        public NotebookExportResult ExportNotebook(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "")
+        public NotebookExportResult ExportNotebook(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "", DateTime? modifiedSince = null, string exportRoot = null, bool preserveExisting = false)
         {
-            notebook.ExportFolder = @$"{Localizer.GetString("ExportFolder")}\{ExportFormatCode}\{notebook.GetNotebookPath()}-{DateTime.Now:yyyyMMdd HH-mm}";
-            CleanUpFolder(notebook);
+            var baseRoot = string.IsNullOrWhiteSpace(exportRoot)
+                ? Path.Combine(Localizer.GetString("ExportFolder"), ExportFormatCodeInternal)
+                : Path.Combine(exportRoot, ExportFormatCodeInternal);
+
+            Directory.CreateDirectory(baseRoot);
+
+            var runFolder = preserveExisting
+                ? baseRoot
+                : Path.Combine(baseRoot, $"{notebook.GetNotebookPath()}-{DateTime.Now:yyyyMMdd HH-mm}");
+
+            Directory.CreateDirectory(runFolder);
+
+            notebook.ExportFolder = runFolder;
+            CleanUpFolder(notebook, preserveExisting);
 
             // Initialize hierarchy of the notebook from OneNote APIs
             try
@@ -67,15 +81,20 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
                 };
             }
 
-            return ExportNotebookInTargetFormat(notebook, sectionNameFilter, pageNameFilter);
+            return ExportNotebookInTargetFormat(notebook, sectionNameFilter, pageNameFilter, modifiedSince);
         }
 
-        public abstract NotebookExportResult ExportNotebookInTargetFormat(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "");
+        public abstract NotebookExportResult ExportNotebookInTargetFormat(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "", DateTime? modifiedSince = null);
 
-        private static void CleanUpFolder(Notebook notebook)
+        private static void CleanUpFolder(Notebook notebook, bool preserveExisting)
         {
             // Cleanup Notebook export folder
-            DirectoryHelper.ClearFolder(GetNotebookFolderPath(notebook));
+            var notebookFolderPath = GetNotebookFolderPath(notebook);
+
+            if (preserveExisting)
+                Directory.CreateDirectory(notebookFolderPath);
+            else
+                DirectoryHelper.ClearFolder(notebookFolderPath);
 
             // Cleanup temp folder
             DirectoryHelper.ClearFolder(GetTmpFolder(notebook));
@@ -85,6 +104,14 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
         protected static string GetTmpFolder(Node node)
             => Path.Combine(Path.GetTempPath(), node.GetNotebookPath());
+
+        protected static bool IsPageRecentlyModified(Page page, DateTime threshold)
+        {
+            if (page.LastModificationDate >= threshold || page.CreationDate >= threshold)
+                return true;
+
+            return page.ChildPages.Any(child => IsPageRecentlyModified(child, threshold));
+        }
 
         /// <summary>
         /// Export a Page and its attachments
@@ -132,7 +159,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
                 {
                     // If debug mode enabled, copy the page docx file next to the page md file
                     var docxFilePath = Path.ChangeExtension(GetPageMdFilePath(page), "docx");
-                    File.Copy(docxFileTmpFile, docxFilePath);
+                    File.Copy(docxFileTmpFile, docxFilePath, true);
                 }
 
                 // Convert docx file into Md using PanDoc
@@ -304,7 +331,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
                     Directory.CreateDirectory(Path.GetDirectoryName(exportFilePath));
 
                     // Copy attachment file into export folder
-                    File.Copy(attach.ActualSourceFilePath, exportFilePath);
+                    File.Copy(attach.ActualSourceFilePath, exportFilePath, true);
                     //File.SetAttributes(exportFilePath, FileAttributes.Normal); // Prevent exception during removing of export directory
 
                     // Update page markdown to insert md references to attachments
@@ -405,7 +432,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
             {
                 var attachFilePath = GetAttachmentFilePath(attach);
                 Directory.CreateDirectory(Path.GetDirectoryName(attachFilePath));
-                File.Copy(attach.ActualSourceFilePath, attachFilePath);
+                File.Copy(attach.ActualSourceFilePath, attachFilePath, true);
                 File.Delete(attach.ActualSourceFilePath);
             }
 

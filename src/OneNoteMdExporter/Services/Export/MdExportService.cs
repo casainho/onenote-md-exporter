@@ -3,6 +3,7 @@ using alxnbl.OneNoteMdExporter.Infrastructure;
 using alxnbl.OneNoteMdExporter.Models;
 using Serilog;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using YamlDotNet.Serialization;
@@ -16,7 +17,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
     /// </summary>
     public class MdExportService : ExportServiceBase
     {
-        protected override string ExportFormatCode { get; } = "md";
+        protected override string ExportFormatCodeInternal { get; } = "md";
 
         protected override string GetResourceFolderPath(Page page)
         {
@@ -71,7 +72,7 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
         protected override string GetAttachmentMdReference(Attachement attachment)
             => Path.GetRelativePath(Path.GetDirectoryName(GetPageMdFilePath(attachment.ParentPage)), GetAttachmentFilePath(attachment)).Replace("\\", "/");
 
-        public override NotebookExportResult ExportNotebookInTargetFormat(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "")
+        public override NotebookExportResult ExportNotebookInTargetFormat(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "", DateTime? modifiedSince = null)
         {
             var result = new NotebookExportResult();
 
@@ -81,16 +82,38 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
             Log.Information(String.Format(Localizer.GetString("FoundXSections"), sections.Count));
 
             // Export each section
-            int cmptSect = 0;
+            var sectionsToProcess = new List<(Section Section, List<Page> Pages)>();
+
             foreach (Section section in sections)
             {
-                Log.Information($"{Localizer.GetString("StartProcessingSectionX")} ({++cmptSect}/{sections.Count}) :  {section.GetPath(AppSettings.MdMaxFileLength)}\\{section.Title}");
-
                 if (section.IsSectionGroup)
                     throw new InvalidOperationException("Cannot call ExportSection on section group with MdExport");
 
-                // Get pages list
-                var pages = OneNoteApp.Instance.FillSectionPages(section).Where(p => string.IsNullOrEmpty(pageNameFilter) || p.Title == pageNameFilter).ToList();
+                var pages = OneNoteApp.Instance.FillSectionPages(section)
+                    .Where(p => string.IsNullOrEmpty(pageNameFilter) || p.Title == pageNameFilter)
+                    .ToList();
+
+                if (modifiedSince.HasValue)
+                {
+                    pages = pages.Where(p => IsPageRecentlyModified(p, modifiedSince.Value)).ToList();
+
+                    if (pages.Count == 0)
+                    {
+                        Log.Debug($"Skipping section {section.Title} because no pages were modified since {modifiedSince.Value:yyyy-MM-dd HH:mm}");
+                        continue;
+                    }
+                }
+
+                sectionsToProcess.Add((section, pages));
+            }
+
+            int cmptSect = 0;
+            foreach (var sectionInfo in sectionsToProcess)
+            {
+                var section = sectionInfo.Section;
+                var pages = sectionInfo.Pages;
+
+                Log.Information($"{Localizer.GetString("StartProcessingSectionX")} ({++cmptSect}/{sectionsToProcess.Count}) :  {section.GetPath(AppSettings.MdMaxFileLength)}\\{section.Title}");
 
                 int cmptPage = 0;
 
