@@ -21,10 +21,14 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
         protected override string GetResourceFolderPath(Page page)
         {
-            if (AppSettings.ResourceFolderLocation == ResourceFolderLocationEnum.RootFolder)
-                return Path.Combine(page.GetNotebook().ExportFolder, AppSettings.ResourceFolderName);
-            else
-                return Path.Combine(Path.GetDirectoryName(GetPageMdFilePath(page)), AppSettings.ResourceFolderName);
+            // Store attachments directly in the same folder as the Markdown file
+            var mdDirectory = Path.GetDirectoryName(GetPageMdFilePath(page));
+
+            // Fallback safety in case something goes wrong
+            if (string.IsNullOrEmpty(mdDirectory))
+                mdDirectory = page.GetNotebook().ExportFolder;
+
+            return mdDirectory;
         }
 
         protected override string GetPageMdFilePath(Page page)
